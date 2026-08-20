@@ -63,6 +63,7 @@ namespace TransferWindowPlanner
             public double AlarmUT { get; set; }      // UT at which alarm should fire
             public int LeadSeconds { get; set; }     // lead-time in seconds before the alarm event (optional)
             public string Notes { get; set; }        // free-form text
+            public double PhaseAngleRad { get; set; } // Phase angle in radians for this transfer (optional)
             // Add any other KAC-relevant fields you need (repeat, color, vessel id, etc.)
         }
 
@@ -88,36 +89,50 @@ namespace TransferWindowPlanner
                     return res;
                 }
 
-                // Call the Lambert solver path used by the mod. There are two common overload patterns in the mod:
-                //  - LambertSolver.TransferDeltaV(origin, dest, departureUT, timeOfFlightUT, initialAlt, initialIncl, finalAlt)
-                //  - Or the overload with out TransferDeltaVInfo
-                // We'll attempt the overload that returns a TransferDeltaVInfo via an out param (existing TWP code uses that).
-                TransferDeltaVInfo info = null;
+                // Call the Lambert solver overload that provides TransferDetails (preferred) and fall back to the simpler overload.
+                TransferDeltaVInfo info = default(TransferDeltaVInfo);
+                TransferDetails details = null;
+
                 try
                 {
-                    // Preferred: overload that populates a TransferDeltaVInfo out parameter
-                    LambertSolver.TransferDeltaV(origin, dest, req.DepartureUT, req.TimeOfFlightUT,
-                        req.InitialOrbitAltitude, req.InitialOrbitInclinationRad, req.FinalOrbitAltitude, out info);
+                    // Preferred overload: returns TransferDeltaVInfo and outputs a TransferDetails object with richer data
+                    info = LambertSolver.TransferDeltaV(origin, dest, req.DepartureUT, req.TimeOfFlightUT,
+                        req.InitialOrbitAltitude, req.InitialOrbitInclinationRad, req.FinalOrbitAltitude, out details);
                 }
                 catch
                 {
-                    // Fallback: overload that returns TransferDeltaVInfo
+                    // Fallback: call the overload that returns TransferDeltaVInfo only
                     info = LambertSolver.TransferDeltaV(origin, dest, req.DepartureUT, req.TimeOfFlightUT,
                         req.InitialOrbitAltitude, req.InitialOrbitInclinationRad, req.FinalOrbitAltitude);
                 }
 
-                if (info == null)
+                if (details != null)
+                {
+                    // Use the rich TransferDetails when available
+                    res.TotalDeltaV = details.DVTotal;
+                    var ev = details.EjectionVector;
+                    res.EjectionVector = new Vec3d(ev.x, ev.y, ev.z);
+                    var pd = details.PeriDirection;
+                    res.PeriapsisDirection = new Vec3d(pd.x, pd.y, pd.z);
+                    res.PhaseAngleRad = details.PhaseAngle;
+                    res.RawTransferInfo = details;
+                }
+                else if (!double.IsNaN(info.Total) && !double.IsInfinity(info.Total))
+                {
+                    // Limited info only
+                    res.TotalDeltaV = info.Total;
+                    res.RawTransferInfo = info;
+                    // Ejection vector, periapsis direction and phase angle are not available from the simple TransferDeltaVInfo
+                    res.EjectionVector = new Vec3d(0, 0, 0);
+                    res.PeriapsisDirection = new Vec3d(0, 0, 0);
+                    res.PhaseAngleRad = 0;
+                }
+                else
                 {
                     res.ErrorMessage = "Lambert solver returned no result.";
                     return res;
                 }
 
-                // Populate result fields. Adjust these names if your internal TransferDeltaVInfo fields are different.
-                res.TotalDeltaV = info.Total;
-                res.EjectionVector = new Vec3d(info.EjectionVector.x, info.EjectionVector.y, info.EjectionVector.z);
-                res.PeriapsisDirection = new Vec3d(info.PeriDirection.x, info.PeriDirection.y, info.PeriDirection.z);
-                res.PhaseAngleRad = info.PhaseAngle;
-                res.RawTransferInfo = info;
                 res.Success = true;
                 res.SuggestedAlarmUT = req.DepartureUT; // default suggestion
                 return res;
@@ -145,7 +160,8 @@ namespace TransferWindowPlanner
                 Name = name,
                 AlarmUT = tr.SuggestedAlarmUT,
                 LeadSeconds = leadSeconds,
-                Notes = notes ?? $"Suggested by TransferWindowPlanner. Total Δv: {tr.TotalDeltaV:F2} m/s"
+                Notes = notes ?? $"Suggested by TransferWindowPlanner. Total Δv: {tr.TotalDeltaV:F2} m/s",
+                PhaseAngleRad = tr.PhaseAngleRad
             };
         }
 
@@ -162,7 +178,7 @@ namespace TransferWindowPlanner
                 if (KACWrapper.APIReady)
                 {
                     // PSEUDO-CODE:
-                    // KACWrapper.KAC.CreateAlarm(spec.Name, spec.AlarmUT, spec.LeadSeconds, spec.Notes);
+                    // KACWrapper.KAC.CreateAlarm(spec.Name, spec.AlarmUT, spec.LeadSeconds, spec.Notes, spec.PhaseAngleRad);
                     //
                     // The actual wrapper methods / parameter list must be adjusted to match your KAC wrapper
                     // (look at the KAC wrapper in this project and hook the appropriate create/add method).
